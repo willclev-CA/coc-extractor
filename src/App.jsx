@@ -4,6 +4,27 @@ const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.mi
 const PDFJS_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 const SHEETJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
 
+const EXTRACT_SYSTEM = `You are a data extraction assistant for Crystal Analytical LLC. Extract only the Sample Information table from this PLM-FRM-010 Bulk Asbestos Chain of Custody form image.
+
+Return ONLY valid JSON — no preamble, no markdown fences, no commentary:
+{
+  "samples": [
+    { "sample_number": "", "ha_code": "", "material_location": "", "material_description": "" }
+  ]
+}
+
+Rules:
+- Sample numbers are sequential integers written by hand (1, 2, 3, 4... or 10, 11, etc.) — NOT 8-digit lab IDs. Extract every row that has a sample number written in the Sample Number column.
+- ha_code: the Homogeneous Area code if present (e.g. HA-1, A, 1). Leave empty string if blank.
+- material_location rules:
+    * If the cell contains actual location text → extract it as-is
+    * If the cell contains a carry-forward indicator (an arrow ↓ →, ditto mark ("), hash/tick mark, vertical line |, horizontal dash —, or any symbol clearly meaning "same as above") → return the exact string "<<carry>>"
+    * If the cell is completely blank with no marks at all → return empty string ""
+- material_description: what the material is (e.g. Drywall, Compound, floor tile, pipe insulation, etc.)
+- Empty/illegible fields → empty string
+- Only include rows that have a sample number written — skip fully blank rows
+- Do not include the header row`;
+
 const COLUMNS = [
   { key: "sample_number",        label: "Sample Number",        width: 130 },
   { key: "ha_code",              label: "HA",                   width: 80  },
@@ -54,18 +75,29 @@ export default function COCExtractor() {
   };
 
   const extractPage = async (base64, pageNum, totalPages, filename) => {
-    const resp = await fetch("/api/extract", {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        image_base64: base64,
-        page_num:     pageNum,
-        total_pages:  totalPages,
-        filename,
-      }),
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system: EXTRACT_SYSTEM,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+            { type: "text", text: `Page ${pageNum} of ${totalPages} — file: ${filename}. Extract the sample table.` }
+          ]
+        }]
+      })
     });
-    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
-    return await resp.json();
+    const data = await resp.json();
+    const txt = data.content?.find(b => b.type === "text")?.text || "{}";
+    try {
+      return JSON.parse(txt.replace(/```json\n?|```/g, "").trim());
+    } catch {
+      return { samples: [] };
+    }
   };
 
   const processPdf = async (file) => {
